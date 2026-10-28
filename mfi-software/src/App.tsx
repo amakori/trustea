@@ -20,7 +20,8 @@ import {
   ExternalLink,
   ChevronRight,
   Flame,
-  Power
+  Power,
+  Package
 } from 'lucide-react';
 import {
   socket,
@@ -34,9 +35,10 @@ import {
   triggerSimulation
 } from './api';
 import CreatorDeductionQueue from './CreatorDeductionQueue';
+import FulfilmentLoanQueue from './FulfilmentLoanQueue';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'monitor' | 'safeguards' | 'gateways' | 'history' | 'sms' | 'creator-deductions'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'safeguards' | 'gateways' | 'history' | 'sms' | 'creator-deductions' | 'fulfilment'>('monitor');
   const [overview, setOverview] = useState<any>(null);
   const [loans, setLoans] = useState<any[]>([]);
   const [borrowers, setBorrowers] = useState<any[]>([]);
@@ -283,6 +285,15 @@ export default function App() {
           >
             <HandCoins className="w-4 h-4" />
             <span>Creator Deductions</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('fulfilment')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg font-medium transition ${
+              activeTab === 'fulfilment' ? 'bg-red-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Package className="w-4 h-4" />
+            <span>Trustea Fulfilment</span>
           </button>
         </div>
       </header>
@@ -866,6 +877,7 @@ export default function App() {
           </div>
         )}
         {activeTab === 'creator-deductions' && <CreatorDeductionQueue />}
+        {activeTab === 'fulfilment' && <FulfilmentLoanQueue />}
       </main>
 
       {/* Audit Drawer / Modal */}
@@ -980,6 +992,13 @@ export default function App() {
         >
           <HandCoins className="w-5 h-5 mb-0.5" />
           <span>MFI Support</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('fulfilment')}
+          className={`flex flex-col items-center text-[10px] font-medium ${activeTab === 'fulfilment' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
+        >
+          <Package className="w-5 h-5 mb-0.5" />
+          <span>Fulfilment</span>
         </button>
       </nav>
     </div>

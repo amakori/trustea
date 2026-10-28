@@ -21,8 +21,16 @@ import {
   submitPromptConfirmation,
   fetchBorrowerData
 } from './api';
+import Fulfilment from './Fulfilment';
 
 export default function App() {
+  if (window.location.pathname.replace(/\/+$/, '') === '/fulfilment') {
+    return <Fulfilment />;
+  }
+  return <InstapayHome />;
+}
+
+function InstapayHome() {
   const [borrowerPhone, setBorrowerPhone] = useState('0978587412');
   const [borrowerName, setBorrowerName] = useState('Mwamba Chileshe');
   const [borrowerCredit, setBorrowerCredit] = useState<any>(null);
@@ -164,9 +172,14 @@ export default function App() {
               <p className="text-[10px] text-slate-400">Powered by Trustea Microfinance &amp; Airtel Money</p>
             </div>
           </div>
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">
-            Airtel Online
-          </span>
+          <div className="flex items-center gap-2">
+            <a href="/fulfilment" className="rounded-full border border-emerald-700 px-2.5 py-1 text-[10px] font-bold text-emerald-300 no-underline hover:bg-emerald-950">
+              Send a parcel
+            </a>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">
+              Airtel Online
+            </span>
+          </div>
         </div>
 
         {/* Credit Limit Banner */}

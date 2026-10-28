@@ -7,6 +7,11 @@ export const SUPABASE_URL = process.env.SUPABASE_URL || 'https://wspdjsoukzbinyv
 export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndzcGRqc291a3piaW55dnB0cWt2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM5NTEwMDAsImV4cCI6MjA2OTUyNzAwMH0.0WpPdoSDnL-DtEUWbpwj1pB8XBcSgSSL-XC4bno1qfY';
 
 export let supabase: SupabaseClient;
+export const supabaseAdmin = process.env.SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    })
+  : null;
 
 try {
   supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {

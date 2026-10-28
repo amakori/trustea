@@ -11,6 +11,7 @@ import {
   registerUssdSession
 } from './ussdCoordinator';
 import { processIncomingCarrierSms } from './smsIngestion';
+import { addFulfilmentSocketHandlers, createFulfilmentRouter } from './fulfilment';
 
 const app = express();
 const server = http.createServer(app);
@@ -18,7 +19,7 @@ const PORT = process.env.PORT || 3001;
 
 // CORS setup for both web apps (MFI Software & Customer App) and Android clients
 app.use(cors({ origin: '*' }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 const io = new SocketIOServer(server, {
   cors: {
@@ -26,6 +27,8 @@ const io = new SocketIOServer(server, {
     methods: ['GET', 'POST']
   }
 });
+app.use('/api/fulfilment', createFulfilmentRouter(io));
+addFulfilmentSocketHandlers(io);
 
 // Seed in-memory store with any historical data
 const initialLoanId = 'b1111111-1111-1111-1111-111111111111';

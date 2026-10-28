@@ -143,3 +143,20 @@ Open `C:\Users\Amakori\trustea\instapay-android` in Android Studio or build with
 - Grant `CALL_PHONE` and `RECEIVE_SMS` permissions.
 - Configure the 4-digit Airtel Money PIN.
 - Built-in **USSD Simulator** enables full interactive testing directly on the phone or emulator.
+
+## 5. Trustea Fulfilment
+
+The customer app's `/fulfilment` page lets the buyer invite a seller using SMS. Each party receives a separate, unguessable private link. The seller supplies the item description, declared value, photos and pickup location; the buyer confirms the destination and consents to an MFI salary-deduction review. Insurance is provisionally calculated at 2% of the declared value and can be changed through `FULFILMENT_INSURANCE_RATE_PCT`.
+
+The MFI operator reviews requests in **Trustea Fulfilment** in the MFI portal. Approval creates a Shipday delivery order. Shipday status webhooks update both parties' tracking views and enqueue pickup/delivery SMS notifications. The buyer confirms receipt to start the 24-hour return window. A return request pauses settlement for MFI review. After the window, an MFI operator confirms the seller payout (or a configured payout provider returns a reference) before the loan is marked as originated.
+
+### Configuration
+
+1. Apply `supabase/migrations/20261030_trustea_fulfilment.sql`.
+2. Populate `public.fulfilment_locations` with active saved locations and coordinates for users who cannot share device location.
+3. Configure the hub using `instapay-realtime-hub/.env.example`. `SUPABASE_SERVICE_ROLE_KEY` and a private `FULFILMENT_TOKEN_ENCRYPTION_KEY` are required; never expose either to a browser.
+4. Configure `SHIPDAY_API_KEY` and `SHIPDAY_WEBHOOK_TOKEN` (Shipday webhook tokens are limited to 32 characters). Register `https://<hub-host>/api/fulfilment/shipday/webhook` as the Shipday order-status webhook and configure the same token in Shipday. If Shipday enables its driver-location webhook for the account, register the same endpoint to receive live map updates.
+5. Set `FULFILMENT_APP_URL` to the customer app's public origin. Set `FULFILMENT_SELLER_PAYOUT_URL` only when a payout service is available; otherwise the MFI operator must enter the confirmed payout reference at settlement.
+6. Configure `VITE_HUB_URL` in the customer and MFI apps. MFI loan review requires an authenticated user with the trusted `app_metadata.role = mfi_operator` claim.
+
+SMS notifications are queued in `public.send_sms` with `phone`, `recipient`, `message`, `processed`, `status`, `sms_type`, and transaction metadata. Item photos are stored in the private `fulfilment-photos` bucket and served with short-lived signed URLs.
