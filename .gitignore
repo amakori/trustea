@@ -1,0 +1,47 @@
+# Dependencies and build output
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+coverage/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.dev.vars
+local.properties
+*.jks
+*.keystore
+google-services.json
+
+# Local Supabase and Wrangler state
+supabase/.temp/
+supabase/.branches/
+.wrangler/
+**/.wrangler/
+
+# IDE, OS, and runtime artifacts
+.idea/caches/
+.idea/workspace.xml
+.idea/modules.xml
+**/.idea/caches/
+**/.idea/workspace.xml
+**/.idea/modules.xml
+.vscode/*.log
+.kotlin/
+**/.kotlin/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+hs_err_pid*
+replay_pid*
+npm-debug.log*
+
+# Python local environments
+__pycache__/
+.venv/
+venv/

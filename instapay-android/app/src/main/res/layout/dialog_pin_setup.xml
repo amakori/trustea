@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:background="#1E293B">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Configure Mobile Money PIN"
+        android:textColor="#F8FAFC"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="This 4-digit PIN is stored in encrypted hardware keystore and automatically entered to authorize approved instant loans."
+        android:textColor="#94A3B8"
+        android:textSize="13sp" />
+
+    <EditText
+        android:id="@+id/etAirtelPin"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:hint="4-digit Transfer PIN (e.g. 2398)"
+        android:inputType="numberPassword"
+        android:maxLength="4"
+        android:textColor="#F8FAFC"
+        android:textColorHint="#64748B"
+        android:backgroundTint="#E11900" />
+
+    <EditText
+        android:id="@+id/etWithdrawPin"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:hint="4-digit Cash Withdraw PIN"
+        android:inputType="numberPassword"
+        android:maxLength="4"
+        android:textColor="#F8FAFC"
+        android:textColorHint="#64748B"
+        android:backgroundTint="#E11900" />
+
+    <EditText
+        android:id="@+id/etHubUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:hint="Realtime Hub URL (e.g. http://10.0.2.2:3001)"
+        android:inputType="textUri"
+        android:textColor="#F8FAFC"
+        android:textColorHint="#64748B"
+        android:backgroundTint="#E11900" />
+</LinearLayout>

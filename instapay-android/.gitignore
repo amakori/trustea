@@ -1,0 +1,15 @@
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.kotlin/
+captures/
+.externalNativeBuild/
+hs_err_pid*.log
+replay_pid*.log

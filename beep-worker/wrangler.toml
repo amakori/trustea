@@ -1,0 +1,8 @@
+name = "beep-worker"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+
+[vars]
+SUPABASE_URL = "https://wspdjsoukzbinyvptqkv.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndzcGRqc291a3piaW55dnB0cWt2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM5NTEwMDAsImV4cCI6MjA2OTUyNzAwMH0.0WpPdoSDnL-DtEUWbpwj1pB8XBcSgSSL-XC4bno1qfY"
+DEFAULT_SERVICE_PHONE = "0978587412"

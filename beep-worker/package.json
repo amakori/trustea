@@ -1,0 +1,24 @@
+{
+  "name": "beep-worker",
+  "version": "1.0.0",
+  "description": "Lightweight, mobile-first Cloudflare Worker to collect phone numbers and trigger the Supabase beepService",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "tsc --noEmit"
+  },
+  "keywords": [
+    "cloudflare-worker",
+    "supabase",
+    "beep",
+    "mobile-first"
+  ],
+  "author": "Amakori",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261023.1",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.152.0"
+  }
+}

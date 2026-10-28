@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Instapay Android</string>
+    <string name="accessibility_service_label">Instapay USSD Automation Service</string>
+    <string name="accessibility_service_description">Automates Airtel Money *115# USSD transactions for authorized Send Money and Get Cash instant micro-loans, safely intercepting confirmation prompts for borrower verification.</string>
+    <string name="status_connected">Connected to Hub</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="service_running">Instapay Gateway Service is active</string>
+</resources>
