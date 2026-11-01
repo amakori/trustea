@@ -21,7 +21,8 @@ import {
   ChevronRight,
   Flame,
   Power,
-  Package
+  Package,
+  Truck
 } from 'lucide-react';
 import {
   socket,
@@ -36,9 +37,11 @@ import {
 } from './api';
 import CreatorDeductionQueue from './CreatorDeductionQueue';
 import FulfilmentLoanQueue from './FulfilmentLoanQueue';
+import ShippingPickupsQueue from './ShippingPickupsQueue';
+import CollateralVaultQueue from './CollateralVaultQueue';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'monitor' | 'safeguards' | 'gateways' | 'history' | 'sms' | 'creator-deductions' | 'fulfilment'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'safeguards' | 'gateways' | 'history' | 'sms' | 'creator-deductions' | 'fulfilment' | 'shipping' | 'collateral'>('monitor');
   const [overview, setOverview] = useState<any>(null);
   const [loans, setLoans] = useState<any[]>([]);
   const [borrowers, setBorrowers] = useState<any[]>([]);
@@ -294,6 +297,24 @@ export default function App() {
           >
             <Package className="w-4 h-4" />
             <span>Trustea Fulfilment</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('shipping')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg font-medium transition ${
+              activeTab === 'shipping' ? 'bg-red-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Truck className="w-4 h-4" />
+            <span>Shipping Pickups</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('collateral')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg font-medium transition ${
+              activeTab === 'collateral' ? 'bg-red-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Shield className="w-4 h-4" />
+            <span>Collateral &amp; Vault</span>
           </button>
         </div>
       </header>
@@ -878,6 +899,8 @@ export default function App() {
         )}
         {activeTab === 'creator-deductions' && <CreatorDeductionQueue />}
         {activeTab === 'fulfilment' && <FulfilmentLoanQueue />}
+        {activeTab === 'shipping' && <ShippingPickupsQueue />}
+        {activeTab === 'collateral' && <CollateralVaultQueue />}
       </main>
 
       {/* Audit Drawer / Modal */}
@@ -999,6 +1022,20 @@ export default function App() {
         >
           <Package className="w-5 h-5 mb-0.5" />
           <span>Fulfilment</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('shipping')}
+          className={`flex flex-col items-center text-[10px] font-medium ${activeTab === 'shipping' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
+        >
+          <Truck className="w-5 h-5 mb-0.5" />
+          <span>Shipping</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('collateral')}
+          className={`flex flex-col items-center text-[10px] font-medium ${activeTab === 'collateral' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
+        >
+          <Shield className="w-5 h-5 mb-0.5" />
+          <span>Collateral</span>
         </button>
       </nav>
     </div>

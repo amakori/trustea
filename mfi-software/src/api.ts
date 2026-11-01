@@ -58,3 +58,13 @@ export async function triggerSimulation(payload: { loan_type: string; amount: nu
   });
   return res.json();
 }
+
+export async function fetchShippingOrders() {
+  const res = await fetch(`${HUB_URL}/api/shipping/orders`);
+  return res.json();
+}
+
+export async function fetchCollateralPickups() {
+  const res = await fetch(`${HUB_URL}/api/collateral/pickups`);
+  return res.json();
+}

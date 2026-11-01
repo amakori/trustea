@@ -12,6 +12,19 @@ import {
 } from './ussdCoordinator';
 import { processIncomingCarrierSms } from './smsIngestion';
 import { addFulfilmentSocketHandlers, createFulfilmentRouter } from './fulfilment';
+import {
+  getShippingOrders,
+  getShippingOrderById,
+  createShippingOrder,
+  executeShippingPickup
+} from './shippingService';
+import {
+  getCollateralPickups,
+  getCollateralById,
+  calculateCollateralValuation,
+  createCollateralAppraisal,
+  executeCollateralPickupAndActivateInstaPay
+} from './collateralService';
 
 const app = express();
 const server = http.createServer(app);
@@ -90,6 +103,8 @@ app.get('/api/mfi/overview', (req: Request, res: Response) => {
   
   const totalDisbursedToday = completedLoans.reduce((sum, l) => sum + Number(l.amount), 0);
   const totalFeesEarned = completedLoans.reduce((sum, l) => sum + Number(l.fee_amount || 0), 0);
+  const shippingList = getShippingOrders();
+  const collateralList = getCollateralPickups();
 
   res.json({
     gateway: inMemoryStore.gateway,
@@ -98,12 +113,18 @@ app.get('/api/mfi/overview', (req: Request, res: Response) => {
       totalLoansCount: allLoans.length,
       completedLoansCount: completedLoans.length,
       activeLoansCount: activeLoans.length,
+      shippingOrdersCount: shippingList.length,
+      activeShippingCount: shippingList.filter(s => s.status !== 'DELIVERED').length,
+      collateralCount: collateralList.length,
+      activeCollateralCount: collateralList.filter(c => c.status !== 'IN_MFI_VAULT').length,
       totalDisbursedToday,
       totalFeesEarned,
       approvalRate: allLoans.length > 0 ? ((completedLoans.length / allLoans.length) * 100).toFixed(1) : '100.0'
     },
     activeLoans: activeLoans.slice(0, 10),
-    recentLoans: allLoans.slice(-10).reverse()
+    recentLoans: allLoans.slice(-10).reverse(),
+    shippingOrders: shippingList.slice(0, 10),
+    collateralPickups: collateralList.slice(0, 10)
   });
 });
 
@@ -260,6 +281,76 @@ app.post('/api/loan/confirm-prompt', (req: Request, res: Response) => {
   handleCustomerResponse(io, loanId, decision, reason);
   const loan = inMemoryStore.loans.get(loanId);
   res.json({ success: true, loan });
+});
+
+// ==========================================
+// SHIPPING PICKUP API ENDPOINTS
+// ==========================================
+app.get('/api/shipping/orders', (req: Request, res: Response) => {
+  const mode = req.query.mode as string | undefined;
+  res.json(getShippingOrders(mode));
+});
+
+app.get('/api/shipping/orders/:id', (req: Request, res: Response) => {
+  const order = getShippingOrderById(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  res.json(order);
+});
+
+app.post('/api/shipping/orders', (req: Request, res: Response) => {
+  const order = createShippingOrder(req.body);
+  io.emit('shipping:order_created', order);
+  res.json({ success: true, order });
+});
+
+app.post('/api/shipping/orders/:id/pickup', (req: Request, res: Response) => {
+  try {
+    const order = executeShippingPickup(io, req.params.id, req.body);
+    res.json({ success: true, order });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ==========================================
+// COLLATERAL PICKUP & INSTAPAY ACTIVATION ENDPOINTS
+// ==========================================
+app.get('/api/collateral/pickups', (req: Request, res: Response) => {
+  res.json(getCollateralPickups());
+});
+
+app.get('/api/collateral/pickups/:id', (req: Request, res: Response) => {
+  const item = getCollateralById(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Collateral item not found' });
+  res.json(item);
+});
+
+app.post('/api/collateral/valuate', (req: Request, res: Response) => {
+  try {
+    const valuation = calculateCollateralValuation(req.body);
+    res.json({ success: true, ...valuation });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/collateral/appraisal', (req: Request, res: Response) => {
+  try {
+    const item = createCollateralAppraisal(req.body);
+    io.emit('collateral:created', item);
+    res.json({ success: true, item });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/collateral/pickups/:id/pickup', (req: Request, res: Response) => {
+  try {
+    const result = executeCollateralPickupAndActivateInstaPay(io, req.params.id, req.body);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ==========================================
