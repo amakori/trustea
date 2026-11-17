@@ -1,0 +1,16 @@
+.orders-page .orders-empty-state {
+  padding: 22px;
+}
+
+.orders-page .order-list {
+  padding: 0 18px;
+}
+
+.orders-page .order-list > .studio-section {
+  margin-top: 0;
+  padding: 18px 0;
+}
+
+.orders-page .order-list > .studio-section + .studio-section {
+  border-top: 1px solid #eeede6;
+}

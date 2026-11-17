@@ -21,6 +21,10 @@ export type FulfilmentRecord = {
   salary_deduction_amount?: number | null;
   origin?: { label: string; address: string; latitude: number; longitude: number };
   destination?: { label: string; address: string; latitude: number; longitude: number };
+  fleetbase_location?: { name: string; address: string; latitude: number; longitude: number } | null;
+  fleetbase_order_id?: string | null;
+  fleetbase_status?: string | null;
+  fleetbase_tracking_url?: string | null;
   photos: string[];
   events: Array<{ id: number; event_type: string; description: string; created_at: string }>;
   shipday_tracking_url?: string | null;

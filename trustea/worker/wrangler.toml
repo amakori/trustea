@@ -1,0 +1,11 @@
+name = "sumthin-media"
+main = "src/index.ts"
+compatibility_date = "2026-11-02"
+
+[vars]
+ALLOWED_ORIGINS = "https://sumthin.vercel.app,https://mfi-software.vercel.app,http://localhost:3004,http://127.0.0.1:3004,http://localhost:3002,http://127.0.0.1:3002"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "sumthin-media"
+preview_bucket_name = "sumthin-media"

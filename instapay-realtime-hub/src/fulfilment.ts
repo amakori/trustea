@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual, createCipheriv, createDecipheriv } from 'crypto';
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual, createCipheriv, createDecipheriv } from 'crypto';
 import { Router, Request, Response, NextFunction, RequestHandler } from 'express';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { v4 as uuidv4 } from 'uuid';
@@ -8,6 +8,14 @@ type Role = 'buyer' | 'seller';
 type LocationInput =
   | { source: 'saved'; location_id: string }
   | { source: 'device'; latitude: number; longitude: number };
+
+const TRUSTEA_COLLECTION_POINT = {
+  name: 'COLLECTION POINT',
+  address: '35 NALIKWANDA ROAD',
+  latitude: -15.4390139,
+  longitude: 28.3478109,
+  phone: '+260978587417'
+};
 
 class FulfilmentError extends Error {
   constructor(public status: number, message: string) {
@@ -76,12 +84,37 @@ function equalHash(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+type AuthenticatedTrusteaUser = {
+  id: string;
+};
+
+async function authenticateTrusteaUser(req: Request): Promise<AuthenticatedTrusteaUser> {
+  const match = /^Bearer\s+(.+)$/i.exec(req.get('authorization') || '');
+  if (!match) throw new FulfilmentError(401, 'Sign in to use your BuySafe inbox.');
+  const { data, error } = await db().auth.getUser(match[1]);
+  if (error || !data.user) throw new FulfilmentError(401, 'Your sign-in has expired. Sign in again.');
+
+  return { id: data.user.id };
+}
+
+function verifyFleetbaseWebhookToken(req: Request): void {
+  const configuredToken = process.env.FLEETBASE_WEBHOOK_TOKEN;
+  const match = /^Bearer\s+(.+)$/i.exec(req.get('authorization') || '');
+  if (!configuredToken) throw new FulfilmentError(503, 'Fleetbase webhook verification is not configured.');
+  const expected = Buffer.from(configuredToken);
+  const supplied = Buffer.from(match?.[1] || req.get('x-fleetbase-webhook-token') || String(req.query.token || ''));
+  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+    throw new FulfilmentError(401, 'Invalid Fleetbase webhook token.');
+  }
+}
+
 function getPublicUrl(): string {
   return (process.env.FULFILMENT_APP_URL || 'http://localhost:3003').replace(/\/+$/, '');
 }
 
 function participantUrl(id: string, token: string): string {
-  const url = new URL(`${getPublicUrl()}/fulfilment`);
+  const sumthinUrl = process.env.SUMTHIN_APP_URL;
+  const url = new URL(sumthinUrl ? sumthinUrl.replace(/\/+$/, '') : `${getPublicUrl()}/fulfilment`);
   url.searchParams.set('transaction', id);
   url.searchParams.set('token', token);
   return url.toString();
@@ -163,7 +196,7 @@ async function resolveLocation(input: LocationInput): Promise<any> {
 }
 
 function safeTransaction(transaction: any, role: Role, photos: string[], events: any[]) {
-  const { buyer_phone, seller_phone, buyer_name, buyer_token_hash, seller_token_hash, buyer_token_ciphertext, seller_token_ciphertext, photo_paths, ...shared } = transaction;
+  const { buyer_phone, seller_phone, buyer_name, buyer_token_hash, seller_token_hash, buyer_token_ciphertext, seller_token_ciphertext, buyer_user_id, seller_user_id, photo_paths, ...shared } = transaction;
   return {
     ...shared,
     buyer_name: role === 'buyer' ? buyer_name : undefined,
@@ -216,62 +249,334 @@ async function checkReturnWindow(transaction: any): Promise<any> {
   return data;
 }
 
-function shipdayPhone(phone: string): string {
-  if (phone.startsWith('+')) return phone;
-  if (phone.startsWith('0')) return `+260${phone.slice(1)}`;
-  if (phone.startsWith('260')) return `+${phone}`;
-  return phone;
+type FleetbaseOrder = {
+  orderId: string;
+  status: string;
+  trackingUrl: string | null;
+};
+
+function fleetbaseConsoleUrl(path: string): string {
+  const base = (process.env.FLEETBASE_CONSOLE_URL || 'https://console.fleetbase.io').replace(/\/+$/, '');
+  return `${base}/${path.replace(/^\/+/, '')}`;
 }
 
-async function createShipdayOrder(transaction: any): Promise<{ orderId: string; trackingId: string | null; trackingUrl: string | null }> {
-  const apiKey = process.env.SHIPDAY_API_KEY;
-  if (!apiKey) throw new FulfilmentError(503, 'Shipday is not configured. Set SHIPDAY_API_KEY before approving a delivery.');
-  const apiUrl = process.env.SHIPDAY_ORDERS_URL || 'https://api.shipday.com/orders';
+function trackingCode(value: unknown, depth = 0): string | null {
+  if (typeof value === 'string' || typeof value === 'number') {
+    const text = String(value).trim();
+    return text && text !== '[object Object]' && !/^https?:\/\//i.test(text) ? text : null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || depth >= 3) return null;
+
+  const record = value as Record<string, unknown>;
+  for (const key of ['tracking_number', 'trackingNumber', 'tracking_code', 'trackingCode', 'tracking_id', 'trackingId', 'number', 'code']) {
+    const code = trackingCode(record[key], depth + 1);
+    if (code) return code;
+  }
+  for (const key of ['tracking', 'tracking_details', 'trackingDetails', 'attributes', 'data']) {
+    const code = trackingCode(record[key], depth + 1);
+    if (code) return code;
+  }
+  return null;
+}
+
+function explicitTrackingUrl(value: unknown, depth = 0): string | null {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    let decodedText = text;
+    try {
+      decodedText = decodeURIComponent(text);
+    } catch {
+      // The URL constructor below will reject malformed URL input if necessary.
+    }
+    if (!text || decodedText.toLowerCase().includes('[object object]') ||
+        (!/^https?:\/\//i.test(text) && !/^(?:\/|~\/)/.test(text))) return null;
+    try {
+      const url = new URL(text, process.env.FLEETBASE_CONSOLE_URL || 'https://console.fleetbase.io');
+      return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || depth >= 3) return null;
+
+  const record = value as Record<string, unknown>;
+  for (const key of ['tracking_url', 'trackingUrl', 'tracking_link', 'trackingLink', 'public_tracking_url', 'publicTrackingUrl', 'url']) {
+    const url = explicitTrackingUrl(record[key], depth + 1);
+    if (url) return url;
+  }
+  for (const key of ['tracking', 'tracking_details', 'trackingDetails', 'attributes', 'data']) {
+    const url = explicitTrackingUrl(record[key], depth + 1);
+    if (url) return url;
+  }
+  return null;
+}
+
+function resolveFleetbaseTrackingUrl(...sources: unknown[]): string | null {
+  for (const source of sources) {
+    const url = explicitTrackingUrl(source);
+    if (url) return url;
+  }
+  for (const source of sources) {
+    const code = trackingCode(source);
+    if (code) return fleetbaseConsoleUrl(`~/track/${encodeURIComponent(code)}`);
+  }
+  return null;
+}
+
+async function createFleetbaseOrder(transaction: any): Promise<FleetbaseOrder> {
+  const apiKey = process.env.FLEETBASE_API_KEY;
+  if (!apiKey) throw new FulfilmentError(503, 'Fleetbase is not configured. Set FLEETBASE_API_KEY before approving a delivery.');
+  const apiUrl = process.env.FLEETBASE_ORDERS_URL || 'https://api.fleetbase.io/v1/orders';
+  const finalDestination = transaction.destination;
+  if (!finalDestination?.address || !Number.isFinite(Number(finalDestination.latitude)) ||
+      !Number.isFinite(Number(finalDestination.longitude))) {
+    throw new FulfilmentError(409, 'The buyer delivery location is incomplete.');
+  }
+  const handoverLocation = {
+    name: TRUSTEA_COLLECTION_POINT.name,
+    address: TRUSTEA_COLLECTION_POINT.address,
+    latitude: TRUSTEA_COLLECTION_POINT.latitude,
+    longitude: TRUSTEA_COLLECTION_POINT.longitude
+  };
+
   const response = await fetch(apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      Authorization: `Basic ${apiKey}`
+      Authorization: `Bearer ${apiKey}`,
+      'Idempotency-Key': transaction.id
     },
     body: JSON.stringify({
-      orderNumber: transaction.id,
-      customerName: transaction.buyer_name,
-      customerAddress: transaction.destination.address,
-      customerPhoneNumber: shipdayPhone(transaction.buyer_phone),
-      restaurantName: transaction.seller_name,
-      restaurantAddress: transaction.origin.address,
-      restaurantPhoneNumber: shipdayPhone(transaction.seller_phone),
-      pickupLatitude: transaction.origin.latitude,
-      pickupLongitude: transaction.origin.longitude,
-      deliveryLatitude: transaction.destination.latitude,
-      deliveryLongitude: transaction.destination.longitude,
-      orderItem: [{ name: transaction.item_description, quantity: 1, unitPrice: Number(transaction.item_value) }],
-      deliveryFee: 0,
-      tax: 0,
-      tips: 0,
-      totalOrderCost: Number(transaction.item_value),
-      paymentMethod: 'ONLINE',
-      pickupInstruction: 'Collect the securely packed Trustea parcel from the seller.',
-      deliveryInstruction: 'Deliver to the buyer. Do not disclose either party’s phone number.'
+      reference: transaction.id,
+      external_id: transaction.id,
+      payload: {
+        pickup: {
+          name: handoverLocation.name,
+          phone: TRUSTEA_COLLECTION_POINT.phone,
+          address: handoverLocation.address,
+          location: {
+            latitude: handoverLocation.latitude,
+            longitude: handoverLocation.longitude
+          }
+        },
+        dropoff: {
+          name: transaction.buyer_name,
+          phone: transaction.buyer_phone,
+          address: finalDestination.address,
+          location: {
+            latitude: Number(finalDestination.latitude),
+            longitude: Number(finalDestination.longitude)
+          }
+        },
+        entities: [{
+          description: transaction.item_description,
+          quantity: 1,
+          value: Number(transaction.item_value),
+          currency: 'ZMW'
+        }],
+        instructions: 'The seller will bring the parcel to the Lusaka collection point at 35 NALIKWANDA ROAD. Fleetbase manages delivery from that collection point directly to the buyer dropoff for all distances. Do not create or dispatch Shipday jobs.',
+        metadata: {
+          trustea_transaction_id: transaction.id,
+          trustea_fulfilment_provider: 'fleetbase',
+          payment_method: transaction.payment_method || 'salary_deduction',
+          payment_status: transaction.payment_status || 'authorized',
+          handover_location: handoverLocation,
+          buyer: {
+            name: transaction.buyer_name,
+            phone: transaction.buyer_phone,
+            destination: {
+              address: finalDestination.address,
+              latitude: Number(finalDestination.latitude),
+              longitude: Number(finalDestination.longitude)
+            }
+          }
+        }
+      },
+      metadata: {
+        trustea_transaction_id: transaction.id,
+        trustea_fulfilment_provider: 'fleetbase',
+        payment_method: transaction.payment_method || 'salary_deduction',
+        payment_status: transaction.payment_status || 'authorized',
+        handover_location: handoverLocation
+      }
     })
   });
-  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
-  if (!response.ok || payload?.success === false) {
-    console.error('[Fulfilment] Shipday order creation failed:', response.status, payload);
-    throw new FulfilmentError(502, 'Shipday could not accept this delivery. No delivery was marked as booked.');
+  const result = await response.json().catch(() => null) as Record<string, any> | null;
+  if (!response.ok || result?.success === false || result?.errors?.length) {
+    console.error('[Fulfilment] Fleetbase order creation failed:', response.status, result);
+    throw new FulfilmentError(502, 'Fleetbase could not accept this delivery. No delivery was marked as booked.');
   }
-  const orderId = payload?.orderId ?? payload?.id;
+  const order = result?.data?.attributes || result?.data || result?.order || result;
+  const orderId = order?.id ?? result?.data?.id ?? order?.uuid ?? order?.public_id;
   if (orderId === undefined || orderId === null) {
-    throw new FulfilmentError(502, 'Shipday returned no order ID. The delivery was not marked as booked.');
+    console.error('[Fulfilment] Fleetbase response did not contain an order ID:', result);
+    throw new FulfilmentError(502, 'Fleetbase returned no order ID. The delivery was not marked as booked.');
   }
+  const trackingUrl = resolveFleetbaseTrackingUrl(order, result);
   return {
     orderId: String(orderId),
-    trackingId: payload?.trackingId ? String(payload.trackingId) : null,
-    trackingUrl: payload?.trackingLink || payload?.trackingUrl
-      ? String(payload.trackingLink || payload.trackingUrl)
-      : null
+    status: String(order.status || 'created'),
+    trackingUrl: trackingUrl ? String(trackingUrl) : null
   };
+}
+
+async function createShopFleetbaseOrder(
+  order: any,
+  authorization: any,
+  product: any,
+  creator: any,
+  pickup: any,
+  delivery: any
+): Promise<FleetbaseOrder> {
+  const apiKey = process.env.FLEETBASE_API_KEY;
+  if (!apiKey) throw new FulfilmentError(503, 'Fleetbase is not configured. Set FLEETBASE_API_KEY before approving a shop order.');
+  if (!pickup?.pickup_address || !pickup?.pickup_phone ||
+      !Number.isFinite(Number(pickup.pickup_latitude)) || !Number.isFinite(Number(pickup.pickup_longitude))) {
+    throw new FulfilmentError(409, 'The creator pickup details are incomplete.');
+  }
+  if (!delivery?.delivery_address || !delivery?.recipient_phone ||
+      !Number.isFinite(Number(delivery.delivery_latitude)) || !Number.isFinite(Number(delivery.delivery_longitude))) {
+    throw new FulfilmentError(409, 'The buyer delivery details are incomplete.');
+  }
+
+  const response = await fetch(process.env.FLEETBASE_ORDERS_URL || 'https://api.fleetbase.io/v1/orders', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'Idempotency-Key': `sumthin-shop-${order.id}`
+    },
+    body: JSON.stringify({
+      reference: order.id,
+      external_id: order.id,
+      payload: {
+        pickup: {
+          name: pickup.pickup_name || creator.display_name,
+          phone: pickup.pickup_phone,
+          address: pickup.pickup_address,
+          location: {
+            latitude: Number(pickup.pickup_latitude),
+            longitude: Number(pickup.pickup_longitude)
+          }
+        },
+        dropoff: {
+          name: delivery.recipient_name,
+          phone: delivery.recipient_phone,
+          address: delivery.delivery_address,
+          location: {
+            latitude: Number(delivery.delivery_latitude),
+            longitude: Number(delivery.delivery_longitude)
+          }
+        },
+        entities: [{
+          description: product.name,
+          quantity: Number(order.quantity),
+          value: Number(authorization.amount),
+          currency: 'ZMW'
+        }],
+        instructions: 'Fleetbase manages the complete delivery from the creator pickup directly to the buyer dropoff for all distances. Do not create or dispatch Shipday jobs.',
+        metadata: {
+          sumthin_creator_order_id: order.id,
+          sumthin_fulfilment_provider: 'fleetbase',
+          salary_payment_authorization_id: authorization.id,
+          buyer: {
+            name: delivery.recipient_name,
+            phone: delivery.recipient_phone,
+            destination: {
+              address: delivery.delivery_address,
+              latitude: Number(delivery.delivery_latitude),
+              longitude: Number(delivery.delivery_longitude)
+            }
+          },
+          seller: {
+            name: creator.display_name,
+            phone: pickup.pickup_phone,
+            pickup: {
+              address: pickup.pickup_address,
+              latitude: Number(pickup.pickup_latitude),
+              longitude: Number(pickup.pickup_longitude)
+            }
+          }
+        }
+      },
+      metadata: {
+        sumthin_creator_order_id: order.id,
+        salary_payment_authorization_id: authorization.id,
+        sumthin_order_type: 'creator_shop',
+        sumthin_fulfilment_provider: 'fleetbase'
+      }
+    })
+  });
+  const result = await response.json().catch(() => null) as Record<string, any> | null;
+  if (!response.ok || result?.success === false || result?.errors?.length) {
+    console.error('[Fulfilment] Fleetbase shop order creation failed:', response.status, result);
+    throw new FulfilmentError(502, 'Fleetbase could not accept this shop delivery. No delivery was marked as booked.');
+  }
+  const remoteOrder = result?.data?.attributes || result?.data || result?.order || result;
+  const orderId = remoteOrder?.id ?? result?.data?.id ?? remoteOrder?.uuid ?? remoteOrder?.public_id;
+  if (orderId === undefined || orderId === null) {
+    console.error('[Fulfilment] Fleetbase shop response did not contain an order ID:', result);
+    throw new FulfilmentError(502, 'Fleetbase returned no order ID. The shop delivery was not marked as booked.');
+  }
+  const trackingUrl = resolveFleetbaseTrackingUrl(remoteOrder, result);
+  return {
+    orderId: String(orderId),
+    status: String(remoteOrder.status || 'created'),
+    trackingUrl: trackingUrl ? String(trackingUrl) : null
+  };
+}
+
+function fleetbaseTransactionStatus(stage: string, currentStatus: string): string | null {
+  const normalized = stage.toLowerCase().replace(/[\s.-]+/g, '_');
+  const statuses: Record<string, string> = {
+    order_created: 'delivery_pending',
+    order_dispatched: 'delivery_pending',
+    created: 'delivery_pending',
+    dispatched: 'delivery_pending',
+    pickup_created: 'delivery_pending',
+    order_started: 'in_transit',
+    started: 'in_transit',
+    in_transit: 'in_transit',
+    en_route: 'in_transit',
+    pickup_started: 'in_transit',
+    picked_up: 'in_transit',
+    rider_picked_up: 'in_transit',
+    first_mile: 'in_transit',
+    order_completed: 'delivered',
+    completed: 'delivered',
+    handover: 'in_transit',
+    hub_received: 'in_transit',
+    at_fleetbase_location: 'at_fleetbase_location',
+    aggregation: 'fleetbase_aggregation',
+    aggregating: 'fleetbase_aggregation',
+    fleetbase_aggregation: 'fleetbase_aggregation',
+    hub_sorting: 'fleetbase_aggregation',
+    middle_mile: 'fleetbase_middle_mile',
+    fleetbase_middle_mile: 'fleetbase_middle_mile',
+    middle_mile_in_transit: 'fleetbase_middle_mile',
+    final_delivery: 'final_delivery',
+    last_mile: 'final_delivery',
+    out_for_delivery: 'final_delivery',
+    delivered: 'delivered',
+    final_delivery_completed: 'delivered',
+    recipient_handover: 'delivered',
+    order_canceled: 'delivery_exception',
+    canceled: 'delivery_exception',
+    cancelled: 'delivery_exception',
+    failed: 'delivery_exception',
+    delivery_exception: 'delivery_exception'
+  };
+  const nextStatus = statuses[normalized];
+  if (!nextStatus) return null;
+
+  const progression = ['delivery_pending', 'in_transit', 'at_fleetbase_location', 'fleetbase_aggregation', 'fleetbase_middle_mile', 'final_delivery', 'delivered'];
+  const currentIndex = progression.indexOf(currentStatus);
+  const nextIndex = progression.indexOf(nextStatus);
+  if (currentStatus === 'return_window' || currentStatus === 'return_requested' ||
+      currentStatus === 'settlement_due' || currentStatus === 'completed' ||
+      currentStatus === 'returned' || currentStatus === 'cancelled') return currentStatus;
+  if (nextStatus === 'delivery_exception') return nextStatus;
+  return currentIndex > nextIndex ? currentStatus : nextStatus;
 }
 
 async function participantSms(transaction: any, buyerMessage: string, sellerMessage: string, smsType: string): Promise<void> {
@@ -294,13 +599,35 @@ async function requireMfiOperator(req: Request): Promise<{ id: string }> {
   return { id: data.user.id };
 }
 
+function phoneCodeHash(challengeId: string, code: string): string {
+  return createHmac('sha256', encryptionKey()).update(`${challengeId}:${code}`).digest('hex');
+}
+
+async function requirePhoneVerification(req: Request): Promise<{ id: string; phone: string }> {
+  const user = await authenticateTrusteaUser(req);
+  const { data: phoneFactor, error: phoneFactorError } = await db().from('fulfilment_verified_phones')
+    .select('phone_id, phone')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (phoneFactorError) {
+    console.error('[Fulfilment] Could not load BuySafe phone factor:', phoneFactorError.message);
+    throw new FulfilmentError(502, 'Could not verify your BuySafe phone factor.');
+  }
+  if (!phoneFactor) {
+    throw new FulfilmentError(403, 'Verify a phone number before using the BuySafe inbox.');
+  }
+
+  return { id: user.id, phone: normalizePhone(phoneFactor.phone, 'verified phone number') };
+}
+
 export function createFulfilmentRouter(io: SocketIOServer): Router {
   const router = Router();
 
   router.get('/config', route(async (_req, res) => {
     res.json({
       insurance_rate_pct: Number(process.env.FULFILMENT_INSURANCE_RATE_PCT || 2),
-      return_window_hours: 24
+      return_window_hours: 24,
+      fleetbase_configured: Boolean(process.env.FLEETBASE_API_KEY)
     });
   }));
 
@@ -313,9 +640,176 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
     res.json(data || []);
   }));
 
+  router.get('/phone-factor', route(async (req, res) => {
+    const user = await authenticateTrusteaUser(req);
+    const { data: savedFactor, error: savedFactorError } = await db().from('fulfilment_verified_phones')
+      .select('phone_id, phone')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (savedFactorError) {
+      console.error('[Fulfilment] Could not load BuySafe phone setup:', savedFactorError.message);
+      throw new FulfilmentError(502, 'Could not load your BuySafe phone setup.');
+    }
+    res.json(savedFactor ? { phone_id: savedFactor.phone_id, phone: savedFactor.phone } : null);
+  }));
+
+  router.post('/phone-factor/challenge', route(async (req, res) => {
+    const user = await authenticateTrusteaUser(req);
+    const { data: existingFactor, error: existingFactorError } = await db().from('fulfilment_verified_phones')
+      .select('phone_id, phone')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (existingFactorError) {
+      console.error('[Fulfilment] Could not check existing BuySafe phone factor:', existingFactorError.message);
+      throw new FulfilmentError(502, 'Could not check your BuySafe phone setup.');
+    }
+    const phone = existingFactor
+      ? normalizePhone(existingFactor.phone, 'verified phone number')
+      : normalizePhone(req.body.phone, 'phone number');
+    if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
+      throw new FulfilmentError(400, 'Enter the phone in international format, for example +260XXXXXXXXX.');
+    }
+    if (existingFactor) {
+      const requestedPhone = typeof req.body.phone === 'string'
+        ? normalizePhone(req.body.phone, 'phone number')
+        : phone;
+      if (requestedPhone !== phone) {
+        throw new FulfilmentError(403, 'BuySafe verification codes can only be sent to your already verified phone number.');
+      }
+    }
+
+    const recentCutoff = new Date(Date.now() - 60_000).toISOString();
+    const { data: recentChallenge, error: recentError } = await db().from('fulfilment_phone_challenges')
+      .select('id')
+      .eq('user_id', user.id)
+      .gt('created_at', recentCutoff)
+      .limit(1)
+      .maybeSingle();
+    if (recentError) {
+      console.error('[Fulfilment] Could not check BuySafe SMS rate limit:', recentError.message);
+      throw new FulfilmentError(502, 'Could not check the SMS verification rate limit.');
+    }
+    if (recentChallenge) throw new FulfilmentError(429, 'Wait one minute before requesting another verification code.');
+
+    const challengeId = uuidv4();
+    const code = String(randomInt(100000, 1000000));
+    const { error: challengeError } = await db().from('fulfilment_phone_challenges').insert({
+      id: challengeId,
+      user_id: user.id,
+      phone,
+      code_hash: phoneCodeHash(challengeId, code),
+      expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    if (challengeError) {
+      console.error('[Fulfilment] Could not create BuySafe phone challenge:', challengeError.message);
+      throw new FulfilmentError(502, 'Could not create a phone verification challenge.');
+    }
+    try {
+      await queueSms(phone, `Your Trustea BuySafe verification code is ${code}. It expires in 10 minutes. Do not share it.`, challengeId, 'buysafe_phone_verification');
+    } catch (error) {
+      const { error: deleteError } = await db().from('fulfilment_phone_challenges').delete().eq('id', challengeId);
+      if (deleteError) console.error('[Fulfilment] Could not remove unsent BuySafe phone challenge:', deleteError.message);
+      throw error;
+    }
+    res.status(201).json({ challenge_id: challengeId, phone });
+  }));
+
+  router.post('/phone-factor/verify', route(async (req, res) => {
+    const user = await authenticateTrusteaUser(req);
+    const challengeId = requireText(req.body.challenge_id, 'verification challenge', 80);
+    const code = requireText(req.body.code, 'verification code', 12);
+    if (!/^\d{6}$/.test(code)) throw new FulfilmentError(400, 'Enter the six-digit verification code.');
+    const { data: challenge, error: challengeError } = await db().from('fulfilment_phone_challenges')
+      .select('id, phone, code_hash, attempts, expires_at, verified_at')
+      .eq('id', challengeId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (challengeError) {
+      console.error('[Fulfilment] Could not load BuySafe phone challenge:', challengeError.message);
+      throw new FulfilmentError(502, 'Could not verify the phone challenge.');
+    }
+    if (!challenge || challenge.verified_at || new Date(challenge.expires_at).getTime() <= Date.now() ||
+        challenge.attempts >= 5) {
+      throw new FulfilmentError(400, 'This verification code has expired or is no longer available. Request another code.');
+    }
+    if (!equalHash(phoneCodeHash(challengeId, code), challenge.code_hash)) {
+      const { error: attemptError } = await db().from('fulfilment_phone_challenges')
+        .update({ attempts: challenge.attempts + 1 })
+        .eq('id', challengeId)
+        .eq('user_id', user.id);
+      if (attemptError) {
+        console.error('[Fulfilment] Could not record BuySafe verification attempt:', attemptError.message);
+        throw new FulfilmentError(502, 'Could not record the verification attempt.');
+      }
+      throw new FulfilmentError(400, 'That verification code is incorrect.');
+    }
+
+    const { data: existingFactor, error: existingFactorError } = await db().from('fulfilment_verified_phones')
+      .select('phone_id, phone')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (existingFactorError) {
+      console.error('[Fulfilment] Could not check verified BuySafe phone:', existingFactorError.message);
+      throw new FulfilmentError(502, 'Could not verify your saved phone.');
+    }
+    if (existingFactor && normalizePhone(existingFactor.phone, 'verified phone number') !== challenge.phone) {
+      throw new FulfilmentError(403, 'This account is already linked to a different verified phone number.');
+    }
+    const phoneId = existingFactor?.phone_id || uuidv4();
+    const { data: verifiedChallenge, error: verifiedError } = await db().from('fulfilment_phone_challenges')
+      .update({
+        verified_at: new Date().toISOString(),
+      })
+      .eq('id', challengeId)
+      .eq('user_id', user.id)
+      .is('verified_at', null)
+      .select('id')
+      .maybeSingle();
+    if (verifiedError) {
+      console.error('[Fulfilment] Could not save BuySafe phone verification:', verifiedError.message);
+      throw new FulfilmentError(502, 'Phone verification could not be saved.');
+    }
+    if (!verifiedChallenge) {
+      throw new FulfilmentError(400, 'This verification code has already been used. Request another code if needed.');
+    }
+
+    if (!existingFactor) {
+      const { error: saveError } = await db().from('fulfilment_verified_phones').insert({
+        user_id: user.id,
+        phone_id: phoneId,
+        phone: challenge.phone,
+      });
+      if (saveError) {
+        console.error('[Fulfilment] Could not save verified BuySafe phone:', saveError.message);
+        throw new FulfilmentError(502, 'The code was verified but the phone could not be linked to your account.');
+      }
+    }
+    res.json({ phone_id: phoneId, phone: challenge.phone });
+  }));
+
+  router.get('/transactions/inbox', route(async (req, res) => {
+    const participant = await requirePhoneVerification(req);
+    const { data, error } = await db().from('fulfilment_transactions')
+      .select('id, buyer_user_id, seller_user_id, buyer_token_ciphertext, seller_token_ciphertext')
+      .or(`buyer_user_id.eq.${participant.id},seller_user_id.eq.${participant.id}`)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) {
+      console.error('[Fulfilment] Could not load BuySafe inbox:', error.message);
+      throw new FulfilmentError(502, 'Could not load your BuySafe inbox.');
+    }
+    res.json((data || []).map((transaction) => {
+      const role: Role = transaction.buyer_user_id === participant.id ? 'buyer' : 'seller';
+      const encryptedToken = role === 'buyer'
+        ? transaction.buyer_token_ciphertext
+        : transaction.seller_token_ciphertext;
+      return { id: transaction.id, token: decryptToken(encryptedToken), role };
+    }));
+  }));
+
   router.post('/transactions', route(async (req, res) => {
+    const participant = await requirePhoneVerification(req);
     const buyerName = requireText(req.body.buyer_name, 'buyer name', 100);
-    const buyerPhone = normalizePhone(req.body.buyer_phone, 'buyer phone number');
     const sellerPhone = normalizePhone(req.body.seller_phone, 'seller phone number');
     const id = uuidv4();
     const buyerToken = randomBytes(32).toString('base64url');
@@ -332,8 +826,9 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
       buyer_token_ciphertext: encryptToken(buyerToken),
       seller_token_ciphertext: encryptToken(sellerToken),
       buyer_name: buyerName,
-      buyer_phone: buyerPhone,
+      buyer_phone: participant.phone,
       seller_phone: sellerPhone,
+      buyer_user_id: participant.id,
       insurance_rate_pct: insuranceRate,
       status: 'seller_response_pending'
     };
@@ -355,6 +850,36 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
       buyer_url: participantUrl(id, buyerToken),
       status: data.status
     });
+  }));
+
+  router.post('/transactions/:id/link', route(async (req, res) => {
+    const participant = await requirePhoneVerification(req);
+    const id = requireText(req.params.id, 'transaction link', 80);
+    const suppliedToken = requireText(req.body.token, 'private transaction link', 200);
+    const transaction = await loadTransaction(id);
+    const hash = tokenHash(suppliedToken);
+    const role: Role | null = equalHash(hash, transaction.buyer_token_hash)
+      ? 'buyer'
+      : equalHash(hash, transaction.seller_token_hash) ? 'seller' : null;
+    if (!role) throw new FulfilmentError(403, 'This private transaction link is invalid.');
+
+    const participantPhone = role === 'buyer' ? transaction.buyer_phone : transaction.seller_phone;
+    if (participant.phone !== normalizePhone(participantPhone, 'transaction phone number')) {
+      throw new FulfilmentError(403, 'Your verified SMS factor does not match this transaction phone number.');
+    }
+    const userIdColumn = role === 'buyer' ? 'buyer_user_id' : 'seller_user_id';
+    const linkedUserId = role === 'buyer' ? transaction.buyer_user_id : transaction.seller_user_id;
+    if (linkedUserId && linkedUserId !== participant.id) {
+      throw new FulfilmentError(409, 'This transaction is already linked to another Trustea account.');
+    }
+    const { error } = await db().from('fulfilment_transactions')
+      .update({ [userIdColumn]: participant.id })
+      .eq('id', id);
+    if (error) {
+      console.error('[Fulfilment] Could not link transaction to account:', error.message);
+      throw new FulfilmentError(502, 'Could not save this transaction to your BuySafe inbox.');
+    }
+    res.json({ success: true, role });
   }));
 
   router.get('/transactions/:id', route(async (req, res) => {
@@ -437,6 +962,8 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
       destination,
       salary_deduction_amount: amount,
       salary_deduction_consent_at: now,
+      payment_method: 'salary_deduction',
+      payment_status: 'pending_mfi',
       status: 'mfi_review',
       updated_at: now
     }).eq('id', transaction.id).eq('status', 'buyer_checkout_pending').select('*').maybeSingle();
@@ -470,7 +997,7 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
   router.post('/transactions/:id/receipt', route(async (req, res) => {
     const { transaction, role } = await authorizeParticipant(req);
     if (role !== 'buyer') throw new FulfilmentError(403, 'Only the buyer can confirm receipt.');
-    if (transaction.status !== 'delivered') throw new FulfilmentError(409, 'Receipt can be confirmed after Shipday marks the parcel delivered.');
+    if (transaction.status !== 'delivered') throw new FulfilmentError(409, 'Receipt can be confirmed after Fleetbase marks the parcel delivered.');
     const now = new Date();
     const ends = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const { data, error } = await db().from('fulfilment_transactions').update({
@@ -527,7 +1054,7 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
     const ids = (loans || []).map(loan => loan.transaction_id);
     const { data: transactions, error: transactionError } = ids.length
       ? await db().from('fulfilment_transactions')
-        .select('id, status, seller_name, item_description, item_value, insurance_amount, return_window_ends_at')
+        .select('id, status, seller_name, item_description, item_value, insurance_amount, return_window_ends_at, fleetbase_order_id, fleetbase_status, fleetbase_tracking_url')
         .in('id', ids)
       : { data: [], error: null };
     if (transactionError) throw new FulfilmentError(502, 'Could not load the related transactions.');
@@ -536,6 +1063,140 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
       const transaction = byId.get(loan.transaction_id);
       return transaction ? [{ ...loan, transaction }] : [];
     }));
+  }));
+
+  router.get('/mfi/shop-orders', route(async (req, res) => {
+    await requireMfiOperator(req);
+    const { data: authorizations, error: authorizationError } = await db().from('salary_payment_authorizations')
+      .select('id, user_id, salary_application_id, amount, quantity, status, created_at')
+      .eq('payment_type', 'shop_order')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (authorizationError) throw new FulfilmentError(502, 'Could not load Sumthin shop payments.');
+    const authorizationIds = (authorizations || []).map(item => item.id);
+    const { data: orders, error: orderError } = authorizationIds.length
+      ? await db().from('creator_orders').select('*').in('payment_authorization_id', authorizationIds)
+      : { data: [], error: null };
+    if (orderError) throw new FulfilmentError(502, 'Could not load Sumthin shop orders.');
+    const orderRows = orders || [];
+    const productIds = [...new Set(orderRows.map(item => item.product_id))];
+    const creatorIds = [...new Set(orderRows.map(item => item.creator_id))];
+    const applicationIds = [...new Set((authorizations || []).map(item => item.salary_application_id))];
+    const [productResult, creatorResult, pickupResult, deliveryResult, applicationResult, returnResult] = await Promise.all([
+      productIds.length
+        ? db().from('creator_products').select('id, name, description, creator_id').in('id', productIds)
+        : Promise.resolve({ data: [], error: null }),
+      creatorIds.length
+        ? db().from('creator_profiles').select('id, display_name').in('id', creatorIds)
+        : Promise.resolve({ data: [], error: null }),
+      creatorIds.length
+        ? db().from('creator_fulfilment_profiles').select('creator_id, pickup_name, pickup_phone, pickup_address').in('creator_id', creatorIds)
+        : Promise.resolve({ data: [], error: null }),
+      orderRows.length
+        ? db().from('creator_order_deliveries').select('*').in('order_id', orderRows.map(item => item.id))
+        : Promise.resolve({ data: [], error: null }),
+      applicationIds.length
+        ? db().from('salary_applications').select('id, applicant_first_name, applicant_last_name, employment_number').in('id', applicationIds)
+        : Promise.resolve({ data: [], error: null }),
+      orderRows.length
+        ? db().from('creator_order_returns').select('id, order_id, reason, status, requested_at, review_note').in('order_id', orderRows.map(item => item.id))
+        : Promise.resolve({ data: [], error: null })
+    ]);
+    const referenceError = productResult.error || creatorResult.error || pickupResult.error || deliveryResult.error || applicationResult.error || returnResult.error;
+    if (referenceError) throw new FulfilmentError(502, 'Could not load shop-order details.');
+    const authorizationById = new Map((authorizations || []).map(item => [item.id, item]));
+    const productById = new Map((productResult.data || []).map(item => [item.id, item]));
+    const creatorById = new Map((creatorResult.data || []).map(item => [item.id, item]));
+    const pickupByCreatorId = new Map((pickupResult.data || []).map(item => [item.creator_id, item]));
+    const deliveryByOrderId = new Map((deliveryResult.data || []).map(item => [item.order_id, item]));
+    const applicationById = new Map((applicationResult.data || []).map(item => [item.id, item]));
+    const returnByOrderId = new Map((returnResult.data || []).map(item => [item.order_id, item]));
+    res.json(orderRows.map(order => {
+      const authorization = authorizationById.get(order.payment_authorization_id);
+      const application = authorization ? applicationById.get(authorization.salary_application_id) : null;
+      return {
+        ...order,
+        authorization,
+        product: productById.get(order.product_id) || null,
+        creator: creatorById.get(order.creator_id) || null,
+        pickup: pickupByCreatorId.get(order.creator_id) || null,
+        delivery_name: deliveryByOrderId.get(order.id)?.recipient_name || null,
+        delivery_phone: deliveryByOrderId.get(order.id)?.recipient_phone || null,
+        delivery_address: deliveryByOrderId.get(order.id)?.delivery_address || null,
+        return_request: returnByOrderId.get(order.id) || null,
+        customer: application ? {
+          name: `${application.applicant_first_name} ${application.applicant_last_name}`,
+          employment_number: application.employment_number
+        } : null
+      };
+    }));
+  }));
+
+  router.post('/mfi/shop-orders/:id/approve', route(async (req, res) => {
+    const operator = await requireMfiOperator(req);
+    const { data: order, error: orderError } = await db().from('creator_orders')
+      .select('*')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (orderError) throw new FulfilmentError(502, 'Could not load the shop order.');
+    if (!order) throw new FulfilmentError(404, 'Shop order not found.');
+    if (!order.payment_authorization_id) {
+      throw new FulfilmentError(409, 'This shop order has no authorized customer payment.');
+    }
+    const { data: authorization, error: authorizationError } = await db().from('salary_payment_authorizations')
+      .select('id, salary_application_id, amount, quantity, status, payment_type')
+      .eq('id', order.payment_authorization_id)
+      .maybeSingle();
+    if (authorizationError) throw new FulfilmentError(502, 'Could not load the shop payment.');
+    if (!authorization || authorization.payment_type !== 'shop_order' || authorization.status !== 'authorized') {
+      throw new FulfilmentError(409, 'This shop payment is not available for MFI approval.');
+    }
+
+    if (order.mfi_approved_at && order.fleetbase_order_id) {
+      res.json({
+        success: true,
+        order_id: order.fleetbase_order_id,
+        status: order.fulfilment_status,
+        duplicate: true
+      });
+      return;
+    }
+    if (!['requested', 'accepted'].includes(order.status)) {
+      throw new FulfilmentError(409, 'This shop order is no longer awaiting MFI fulfilment approval.');
+    }
+
+    const [{ data: product, error: productError }, { data: creator, error: creatorError }, { data: pickup, error: pickupError }, { data: delivery, error: deliveryError }] = await Promise.all([
+      db().from('creator_products').select('id, name, creator_id').eq('id', order.product_id).maybeSingle(),
+      db().from('creator_profiles').select('id, display_name').eq('id', order.creator_id).maybeSingle(),
+      db().from('creator_fulfilment_profiles').select('*').eq('creator_id', order.creator_id).maybeSingle(),
+      db().from('creator_order_deliveries').select('*').eq('order_id', order.id).maybeSingle()
+    ]);
+    if (productError || creatorError || pickupError || deliveryError) throw new FulfilmentError(502, 'Could not load the shop fulfilment details.');
+    if (!product || !creator || !pickup || !delivery) throw new FulfilmentError(409, 'The creator pickup or buyer delivery details are incomplete.');
+
+    const fleetbase = order.fleetbase_order_id
+      ? { orderId: order.fleetbase_order_id, status: order.fleetbase_status || 'created', trackingUrl: order.fleetbase_tracking_url || null }
+      : await createShopFleetbaseOrder(order, authorization, product, creator, pickup, delivery);
+    const { data: updatedOrder, error: updateError } = await db().from('creator_orders')
+      .update({
+        status: 'accepted',
+        mfi_approved_at: order.mfi_approved_at || new Date().toISOString(),
+        mfi_approved_by: order.mfi_approved_by || operator.id,
+        fulfilment_status: order.fulfilment_status === 'awaiting_mfi' ? 'delivery_pending' : order.fulfilment_status,
+        fleetbase_order_id: fleetbase.orderId,
+        fleetbase_status: fleetbase.status,
+        fleetbase_tracking_url: fleetbase.trackingUrl,
+        fleetbase_updated_at: new Date().toISOString()
+      })
+      .eq('id', order.id)
+      .in('status', ['requested', 'accepted'])
+      .select('id')
+      .maybeSingle();
+    if (updateError || !updatedOrder) {
+      console.error('[Fulfilment] Fleetbase accepted the Sumthin shop order, but its order ID could not be saved:', fleetbase.orderId, updateError?.message);
+      throw new FulfilmentError(502, 'Fleetbase accepted the shop order, but the MFI approval could not be saved. Retry safely or contact support.');
+    }
+    res.json({ success: true, order_id: fleetbase.orderId, status: 'delivery_pending' });
   }));
 
   router.post('/mfi/loans/:id/review', route(async (req, res) => {
@@ -547,30 +1208,48 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
     if (!loan || loan.status !== 'pending_mfi') throw new FulfilmentError(409, 'This MFI request has already been reviewed.');
     const transaction = await loadTransaction(loan.transaction_id);
     if (decision === 'approved') {
-      if (transaction.status !== 'mfi_review') throw new FulfilmentError(409, 'This transaction is no longer awaiting MFI review.');
-      const shipday = await createShipdayOrder(transaction);
       const now = new Date().toISOString();
-      const { data: updated, error: updateError } = await db().from('fulfilment_transactions').update({
-        status: 'delivery_pending',
-        shipday_order_id: shipday.orderId,
-        shipday_tracking_id: shipday.trackingId,
-        shipday_tracking_url: shipday.trackingUrl,
-        shipday_status: 'ORDER_INSERTED',
-        updated_at: now
-      }).eq('id', transaction.id).eq('status', 'mfi_review').select('*').maybeSingle();
-      if (updateError || !updated) throw new FulfilmentError(502, 'Shipday accepted the order, but the transaction could not be updated. Contact support before retrying.');
+      let fleetbase: FleetbaseOrder;
+      let updated = transaction;
+      if (transaction.fleetbase_order_id) {
+        fleetbase = {
+          orderId: transaction.fleetbase_order_id,
+          status: transaction.fleetbase_status || 'created',
+          trackingUrl: transaction.fleetbase_tracking_url || null
+        };
+      } else {
+        if (transaction.status !== 'mfi_review') throw new FulfilmentError(409, 'This transaction is no longer awaiting MFI review.');
+        fleetbase = await createFleetbaseOrder({
+          ...transaction,
+          payment_status: transaction.payment_status === 'paid' ? 'paid' : 'authorized'
+        });
+        const { data: saved, error: updateError } = await db().from('fulfilment_transactions').update({
+          status: 'delivery_pending',
+          fleetbase_order_id: fleetbase.orderId,
+          fleetbase_status: fleetbase.status,
+          fleetbase_tracking_url: fleetbase.trackingUrl,
+          fleetbase_updated_at: now,
+          payment_status: 'authorized',
+          updated_at: now
+        }).eq('id', transaction.id).eq('status', 'mfi_review').select('*').maybeSingle();
+        if (updateError || !saved) {
+          console.error('[Fulfilment] Fleetbase accepted the order, but Trustea could not save its order ID:', fleetbase.orderId, updateError?.message);
+          throw new FulfilmentError(502, 'Fleetbase accepted the order, but Trustea could not save its order ID. Contact support before retrying.');
+        }
+        updated = saved;
+      }
       const { error: loanUpdateError } = await db().from('fulfilment_loan_requests').update({
         status: 'approved',
         reviewed_at: now,
         reviewed_by: operator.id,
         review_note: typeof req.body.review_note === 'string' ? req.body.review_note.slice(0, 500) : null
       }).eq('id', loan.id).eq('status', 'pending_mfi');
-      if (loanUpdateError) throw new FulfilmentError(502, 'Delivery was booked, but the MFI decision could not be saved.');
-      await addEvent(transaction.id, 'delivery_booked', `The MFI approved the salary-deduction request and Shipday accepted order ${shipday.orderId}.`);
+      if (loanUpdateError) throw new FulfilmentError(502, 'Fleetbase accepted the order, but the MFI decision could not be saved. Refresh the request before retrying.');
+      await addEvent(transaction.id, 'delivery_booked', `The MFI approved the salary-deduction request. Fleetbase order ${fleetbase.orderId} was created for delivery from the seller directly to the buyer.`);
       await participantSms(
         updated,
-        `Your salary-deduction request was approved and Shipday has accepted transaction ${updated.id.slice(0, 8)}. Tracking is available here.`,
-        `Your package is approved for collection. Your payout will be ZMW ${Number(updated.item_value).toFixed(2)} after delivery and the 24-hour return window. Securely pack transaction ${updated.id.slice(0, 8)} and make it ready at your saved pickup location for Shipday collection. Tracking is available here.`,
+        `Your salary-deduction request was approved and Fleetbase is preparing delivery for transaction ${updated.id.slice(0, 8)}. Tracking is available here.`,
+        `Your package is approved for delivery. Your payout will be ZMW ${Number(updated.item_value).toFixed(2)} after final delivery and the 24-hour return window. Securely pack transaction ${updated.id.slice(0, 8)} and bring it to COLLECTION POINT, 35 NALIKWANDA ROAD, Lusaka. Contact +260978587417.`,
         'delivery_booked'
       );
       io.to(`fulfilment:${updated.id}`).emit('fulfilment:updated', { transaction_id: updated.id });
@@ -589,6 +1268,7 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
     if (loanUpdateError) throw new FulfilmentError(502, 'Could not save the MFI decision.');
     const { data: updated, error: transactionUpdateError } = await db().from('fulfilment_transactions').update({
       status: 'cancelled',
+      payment_status: 'rejected',
       updated_at: now
     }).eq('id', transaction.id).eq('status', 'mfi_review').select('*').maybeSingle();
     if (transactionUpdateError || !updated) throw new FulfilmentError(502, 'Could not close the rejected transaction.');
@@ -675,6 +1355,8 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
     const { data: updated, error: updateError } = await db().from('fulfilment_transactions').update({
       status: 'completed',
       payout_reference: payoutReference,
+      payment_status: 'paid',
+      paid_at: now,
       seller_paid_at: now,
       updated_at: now
     }).eq('id', transaction.id).eq('status', 'settlement_due').select('*').maybeSingle();
@@ -692,104 +1374,189 @@ export function createFulfilmentRouter(io: SocketIOServer): Router {
     res.json({ success: true, status: updated.status });
   }));
 
-  router.post('/shipday/webhook', route(async (req, res) => {
-    const configuredToken = process.env.SHIPDAY_WEBHOOK_TOKEN;
-    const suppliedToken = req.get('token') || '';
-    if (!configuredToken) throw new FulfilmentError(503, 'Shipday webhook verification is not configured.');
-    const expected = Buffer.from(configuredToken);
-    const supplied = Buffer.from(suppliedToken);
-    if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
-      throw new FulfilmentError(401, 'Invalid Shipday webhook token.');
-    }
-    const event = String(req.body?.event || '');
-    if (event === 'LOCATION_UPDATE') {
-      const orderId = req.body?.orderId;
-      const latitude = Number(req.body?.latitude);
-      const longitude = Number(req.body?.longitude);
-      if (orderId === undefined || !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
-          latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
-        throw new FulfilmentError(400, 'Shipday location update is missing a valid order ID or coordinates.');
-      }
-      const { data: transaction, error } = await db().from('fulfilment_transactions')
-        .select('id, status')
-        .eq('shipday_order_id', String(orderId))
+  router.get('/fleetbase/webhook', route(async (req, res) => {
+    verifyFleetbaseWebhookToken(req);
+    res.json({ success: true, message: 'Fleetbase webhook endpoint is active; send events using POST.' });
+  }));
+
+  router.post('/fleetbase/webhook', route(async (req, res) => {
+    verifyFleetbaseWebhookToken(req);
+    const data = req.body?.data?.attributes || req.body?.data || req.body?.order || req.body?.payload || req.body;
+    const metadata = data?.metadata || data?.payload?.metadata || req.body?.metadata || {};
+    const reference = metadata.trustea_transaction_id || data?.external_id || data?.reference || data?.order_number;
+    const remoteOrderId = data?.id || req.body?.data?.id || req.body?.order_id;
+    const eventName = String(req.body?.event || req.body?.type || '');
+    const stage = String(
+      data?.trustea_stage ||
+      data?.stage ||
+      metadata.trustea_stage ||
+      data?.activity?.code ||
+      data?.activity?.name ||
+      data?.status ||
+      eventName
+    );
+    const shopOrderReference = metadata.sumthin_creator_order_id ||
+      metadata.creator_order_id ||
+      (metadata.sumthin_order_type === 'creator_shop' ? reference : null);
+    if (typeof shopOrderReference === 'string' && /^[0-9a-f-]{36}$/i.test(shopOrderReference)) {
+      const { data: shopOrder, error: shopLoadError } = await db().from('creator_orders')
+        .select('id, status, fulfilment_status, fleetbase_order_id, fleetbase_status, fleetbase_tracking_url, fleetbase_updated_at, delivered_at')
+        .eq('id', shopOrderReference)
         .maybeSingle();
-      if (error) throw new FulfilmentError(502, 'Could not load the Shipday transaction.');
-      if (!transaction) throw new FulfilmentError(404, 'No transaction matches this Shipday order.');
-      if (transaction.status !== 'in_transit') {
-        res.json({ success: true });
+      if (shopLoadError) throw new FulfilmentError(502, 'Could not load the Sumthin shop order.');
+      if (!shopOrder || !shopOrder.fleetbase_order_id) throw new FulfilmentError(404, 'No active Sumthin shop order matches this Fleetbase event.');
+      if (remoteOrderId !== undefined && String(remoteOrderId) !== shopOrder.fleetbase_order_id) {
+        throw new FulfilmentError(409, 'Fleetbase order ID does not match the Sumthin shop order.');
+      }
+      const shopTimeValue = req.body?.created_at || data?.updated_at || req.body?.timestamp;
+      const parsedShopTime = typeof shopTimeValue === 'number'
+        ? new Date(shopTimeValue > 1e12 ? shopTimeValue : shopTimeValue * 1000)
+        : shopTimeValue ? new Date(shopTimeValue) : new Date();
+      const shopEventAt = Number.isNaN(parsedShopTime.getTime()) ? new Date() : parsedShopTime;
+      if (shopOrder.fleetbase_updated_at &&
+          new Date(shopOrder.fleetbase_updated_at).getTime() > shopEventAt.getTime()) {
+        res.json({ success: true, ignored: 'stale_event' });
         return;
       }
-      const timestamp = Number(req.body?.currentTimeStamp);
-      const locationAt = Number.isFinite(timestamp) && timestamp > 0
-        ? new Date(timestamp).toISOString()
-        : new Date().toISOString();
-      const { error: updateError } = await db().from('fulfilment_transactions').update({
-        driver_location: { latitude, longitude, updated_at: locationAt },
-        updated_at: new Date().toISOString()
-      }).eq('id', transaction.id);
-      if (updateError) throw new FulfilmentError(502, 'Could not save the driver location update.');
-      io.to(`fulfilment:${transaction.id}`).emit('fulfilment:updated', { transaction_id: transaction.id });
-      res.json({ success: true });
+      const normalizedShopStage = stage.toLowerCase().replace(/[\s.-]+/g, '_');
+      const nextShopStatus = ['order_completed', 'completed', 'delivered', 'final_delivery_completed', 'recipient_handover'].includes(normalizedShopStage)
+        ? 'delivered'
+        : fleetbaseTransactionStatus(stage, shopOrder.fulfilment_status) || shopOrder.fulfilment_status;
+      const trackingUrl = resolveFleetbaseTrackingUrl(data, req.body, shopOrder.fleetbase_tracking_url);
+      const { data: updatedShopOrder, error: shopUpdateError } = await db().from('creator_orders')
+        .update({
+          fulfilment_status: nextShopStatus,
+          status: nextShopStatus === 'delivered' ? 'fulfilled' : shopOrder.status,
+          fleetbase_status: String(data?.status || eventName || stage),
+          fleetbase_tracking_url: trackingUrl,
+          fleetbase_updated_at: shopEventAt.toISOString(),
+          delivered_at: nextShopStatus === 'delivered' ? shopOrder.delivered_at || shopEventAt.toISOString() : shopOrder.delivered_at
+        })
+        .eq('id', shopOrder.id)
+        .eq('fleetbase_order_id', shopOrder.fleetbase_order_id)
+        .select('id')
+        .maybeSingle();
+      if (shopUpdateError || !updatedShopOrder) throw new FulfilmentError(502, 'Could not save the Fleetbase shop-order update.');
+      res.json({ success: true, status: nextShopStatus });
+      return;
+    }
+    const query = db().from('fulfilment_transactions').select('*');
+    const { data: transaction, error: loadError } = typeof reference === 'string' && /^[0-9a-f-]{36}$/i.test(reference)
+      ? await query.eq('id', reference).maybeSingle()
+      : remoteOrderId !== undefined
+        ? await query.eq('fleetbase_order_id', String(remoteOrderId)).maybeSingle()
+        : { data: null, error: null };
+    if (loadError) throw new FulfilmentError(502, 'Could not load the Fleetbase transaction.');
+    if (!transaction || !transaction.fleetbase_order_id) throw new FulfilmentError(404, 'No active Trustea order matches this Fleetbase event.');
+    if (remoteOrderId !== undefined && String(remoteOrderId) !== transaction.fleetbase_order_id) {
+      throw new FulfilmentError(409, 'Fleetbase order ID does not match the Trustea transaction.');
+    }
+
+    const nextStatus = fleetbaseTransactionStatus(stage, transaction.status);
+    const rawStatus = String(data?.status || eventName || stage);
+    const timeValue = req.body?.created_at || data?.updated_at || req.body?.timestamp;
+    const parsedTime = typeof timeValue === 'number'
+      ? new Date(timeValue > 1e12 ? timeValue : timeValue * 1000)
+      : timeValue ? new Date(timeValue) : new Date();
+    const eventAt = Number.isNaN(parsedTime.getTime()) ? new Date() : parsedTime;
+    if (transaction.fleetbase_updated_at &&
+        new Date(transaction.fleetbase_updated_at).getTime() > eventAt.getTime()) {
+      res.json({ success: true, ignored: 'stale_event' });
       return;
     }
 
-    const orderNumber = req.body?.order?.orderNumber;
-    if (typeof orderNumber !== 'string') throw new FulfilmentError(400, 'Shipday webhook is missing order.orderNumber.');
-    const { data: transaction, error } = await db().from('fulfilment_transactions').select('*').eq('id', orderNumber).maybeSingle();
-    if (error) throw new FulfilmentError(502, 'Could not load the Shipday transaction.');
-    if (!transaction) throw new FulfilmentError(404, 'No transaction matches this Shipday order.');
-
-    const shipdayStatus = String(req.body.order_status || '');
-    let status = transaction.status;
-    let pickedUpAt = transaction.picked_up_at;
-    let deliveredAt = transaction.delivered_at;
-    let notification: { buyer: string; seller: string; type: string; description: string } | null = null;
-    const time = Number(req.body.timestamp);
-    const eventAt = Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : new Date().toISOString();
-
-    if (event === 'ORDER_PIKEDUP' && !transaction.picked_up_at) {
-      status = 'in_transit';
-      pickedUpAt = eventAt;
-      notification = {
-        buyer: `Shipday picked up transaction ${transaction.id.slice(0, 8)}. Follow live tracking here.`,
-        seller: `Shipday picked up transaction ${transaction.id.slice(0, 8)}. Follow live tracking here.`,
-        type: 'picked_up',
-        description: 'The Shipday driver picked up the parcel.'
-      };
-    } else if (event === 'ORDER_COMPLETED' && !transaction.delivered_at) {
-      status = 'delivered';
-      deliveredAt = eventAt;
-      notification = {
-        buyer: `Shipday marked transaction ${transaction.id.slice(0, 8)} as delivered. Confirm receipt in Trustea to start your 24-hour return window.`,
-        seller: `Shipday delivered transaction ${transaction.id.slice(0, 8)}. The buyer has been asked to confirm receipt.`,
-        type: 'delivered',
-        description: 'Shipday marked the parcel delivered. The buyer can now confirm receipt.'
-      };
-    } else if (event === 'ORDER_FAILED' || event === 'ORDER_INCOMPLETE' || shipdayStatus === 'FAILED_DELIVERY' || shipdayStatus === 'INCOMPLETE') {
-      status = 'delivery_exception';
-      notification = {
-        buyer: `Shipday could not complete transaction ${transaction.id.slice(0, 8)}. Trustea support will follow up.`,
-        seller: `Shipday could not complete transaction ${transaction.id.slice(0, 8)}. Trustea support will follow up.`,
-        type: 'delivery_exception',
-        description: 'Shipday reported a delivery exception. Settlement is paused.'
-      };
-    }
-
-    const { data: updated, error: updateError } = await db().from('fulfilment_transactions').update({
-      status,
-      shipday_status: shipdayStatus || transaction.shipday_status,
+    const nextStatusValue = nextStatus || transaction.status;
+    const statusChanged = nextStatusValue !== transaction.status;
+    const driver = data?.driver_location || data?.location || req.body?.driver_location;
+    const latitude = Number(driver?.latitude ?? driver?.lat);
+    const longitude = Number(driver?.longitude ?? driver?.lng);
+    const hasLocation = Number.isFinite(latitude) && Number.isFinite(longitude) &&
+      latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180;
+    const deliveredAt = nextStatusValue === 'delivered'
+      ? transaction.delivered_at || eventAt.toISOString()
+      : transaction.delivered_at;
+    const pickedUpAt = nextStatusValue === 'in_transit'
+      ? transaction.picked_up_at || eventAt.toISOString()
+      : transaction.picked_up_at;
+    const handoverAt = nextStatusValue === 'at_fleetbase_location'
+      ? transaction.fleetbase_location_handed_over_at || eventAt.toISOString()
+      : transaction.fleetbase_location_handed_over_at;
+    const trackingUrl = resolveFleetbaseTrackingUrl(data, req.body, transaction.fleetbase_tracking_url);
+    const update: Record<string, unknown> = {
+      fleetbase_status: rawStatus,
+      fleetbase_updated_at: eventAt.toISOString(),
+      fleetbase_tracking_url: trackingUrl,
+      status: nextStatusValue,
       picked_up_at: pickedUpAt,
+      fleetbase_location_handed_over_at: handoverAt,
       delivered_at: deliveredAt,
       updated_at: new Date().toISOString()
-    }).eq('id', transaction.id).select('*').single();
-    if (updateError) throw new FulfilmentError(502, 'Could not save the Shipday tracking update.');
-    if (notification) {
-      await addEvent(transaction.id, notification.type, notification.description);
-      await participantSms(updated, notification.buyer, notification.seller, notification.type);
-      io.to(`fulfilment:${transaction.id}`).emit('fulfilment:updated', { transaction_id: transaction.id });
+    };
+    if (hasLocation) {
+      update.driver_location = { latitude, longitude, updated_at: eventAt.toISOString() };
     }
-    res.json({ success: true });
+    const { data: updated, error: updateError } = await db().from('fulfilment_transactions')
+      .update(update)
+      .eq('id', transaction.id)
+      .eq('fleetbase_order_id', transaction.fleetbase_order_id)
+      .select('*')
+      .maybeSingle();
+    if (updateError || !updated) throw new FulfilmentError(502, 'Could not save the Fleetbase status update.');
+
+    if (statusChanged) {
+      const eventType = `fleetbase_${nextStatusValue}`;
+      const descriptions: Record<string, string> = {
+        delivery_pending: 'Fleetbase accepted the order and is preparing delivery.',
+        in_transit: 'Fleetbase has collected the item and is delivering it to the buyer.',
+        at_fleetbase_location: 'Fleetbase reported the item at one of its facilities.',
+        fleetbase_aggregation: 'Fleetbase received the item into its aggregation workflow.',
+        fleetbase_middle_mile: 'Fleetbase is moving the item through its middle-mile network.',
+        final_delivery: 'Fleetbase has started the final delivery to the buyer.',
+        delivered: 'Fleetbase confirmed delivery to the buyer. The buyer can confirm receipt.',
+        delivery_exception: 'Fleetbase reported a delivery exception. Settlement is paused.'
+      };
+      await addEvent(transaction.id, eventType, descriptions[nextStatusValue] || 'Fleetbase updated this order.');
+      const messages: Record<string, { buyer: string; seller: string }> = {
+        delivery_pending: {
+          buyer: 'Fleetbase has accepted your order and is preparing delivery.',
+          seller: 'Fleetbase is preparing pickup of your item.'
+        },
+        in_transit: {
+          buyer: 'Fleetbase has collected your item and is delivering it to you.',
+          seller: 'Fleetbase has collected your item and is delivering it to the buyer.'
+        },
+        at_fleetbase_location: {
+          buyer: 'Fleetbase reported your item at one of its facilities.',
+          seller: 'Fleetbase reported the item at one of its facilities.'
+        },
+        fleetbase_aggregation: {
+          buyer: 'Fleetbase is sorting your item for onward delivery.',
+          seller: 'Fleetbase has received your item and started aggregation.'
+        },
+        fleetbase_middle_mile: {
+          buyer: 'Your item is moving through Fleetbase middle-mile delivery.',
+          seller: 'Your item is moving through Fleetbase middle-mile delivery.'
+        },
+        final_delivery: {
+          buyer: 'Fleetbase has started the final delivery to your location.',
+          seller: 'Fleetbase has started the final delivery to the buyer.'
+        },
+        delivered: {
+          buyer: 'Fleetbase delivered your item. Confirm receipt in Trustea to start the 24-hour return window.',
+          seller: 'Fleetbase delivered the item to the buyer, who can now confirm receipt.'
+        },
+        delivery_exception: {
+          buyer: 'Fleetbase reported a delivery issue. Trustea support will follow up.',
+          seller: 'Fleetbase reported a delivery issue. Trustea support will follow up.'
+        }
+      };
+      const notification = messages[nextStatusValue];
+      if (notification) {
+        await participantSms(updated, notification.buyer, notification.seller, eventType);
+      }
+    }
+    io.to(`fulfilment:${transaction.id}`).emit('fulfilment:updated', { transaction_id: transaction.id });
+    res.json({ success: true, status: updated.status });
   }));
 
   router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {

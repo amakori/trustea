@@ -1,0 +1,73 @@
+.media-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.media-picker-label {
+  color: #55594f;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.media-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.media-picker-button {
+  position: relative;
+  overflow: hidden;
+}
+
+.media-picker-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.media-picker-button:focus-within {
+  outline: 3px solid #a2c6aa;
+  outline-offset: 2px;
+}
+
+.media-picker-selection {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: #55594f;
+  font-size: 11px;
+}
+
+.media-picker-selection img {
+  width: 42px;
+  height: 42px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.media-picker-selection span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-picker-selection button {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  padding: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: #f0eee7;
+  cursor: pointer;
+}
+
+.media-picker > small {
+  color: #898b82;
+  font-size: 10px;
+}

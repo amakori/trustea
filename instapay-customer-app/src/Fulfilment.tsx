@@ -60,7 +60,7 @@ function stageIndex(status: string): number {
   if (status === 'seller_response_pending') return 0;
   if (status === 'buyer_checkout_pending') return 1;
   if (status === 'mfi_review') return 2;
-  if (status === 'delivery_pending' || status === 'in_transit') return 3;
+  if (['delivery_pending', 'in_transit', 'at_fleetbase_location', 'fleetbase_aggregation', 'fleetbase_middle_mile', 'final_delivery'].includes(status)) return 3;
   if (status === 'delivered') return 4;
   if (status === 'return_window' || status === 'return_requested') return 5;
   return 6;
@@ -71,8 +71,12 @@ function statusLabel(status: string): string {
     seller_response_pending: 'Waiting for seller',
     buyer_checkout_pending: 'Your confirmation needed',
     mfi_review: 'MFI review',
-    delivery_pending: 'Ready for collection',
-    in_transit: 'On the way',
+    delivery_pending: 'Fleetbase arranging pickup',
+    in_transit: 'On the way to Fleetbase',
+    at_fleetbase_location: 'At Fleetbase location',
+    fleetbase_aggregation: 'Fleetbase aggregation',
+    fleetbase_middle_mile: 'Fleetbase middle mile',
+    final_delivery: 'Final delivery',
     delivered: 'Delivered',
     return_window: 'Return window open',
     return_requested: 'Return under review',
@@ -448,17 +452,18 @@ export default function Fulfilment() {
 
               {transaction.status === 'seller_response_pending' && !isSeller && <WaitingCard title="Waiting for seller" description="We’ve sent the seller a private link. You’ll receive an SMS as soon as the item details are ready." icon={<Clock3 />} />}
               {transaction.status === 'buyer_checkout_pending' && isSeller && <WaitingCard title="Waiting for buyer" description="The buyer is reviewing the item and choosing a delivery location. Your contact details remain private." icon={<Clock3 />} />}
-              {transaction.status === 'mfi_review' && <WaitingCard title="MFI review in progress" description="The MFI is reviewing the salary-deduction request. Shipday is not booked until the MFI approves it." icon={<ShieldCheck />} />}
-              {(transaction.status === 'delivery_pending' || transaction.status === 'in_transit') && (
+              {transaction.status === 'mfi_review' && <WaitingCard title="MFI review in progress" description="The MFI is reviewing the salary-deduction request. After approval, the seller will bring the item to the Lusaka collection point and Fleetbase will deliver it to you." icon={<ShieldCheck />} />}
+              {['delivery_pending', 'in_transit', 'at_fleetbase_location', 'fleetbase_aggregation', 'fleetbase_middle_mile', 'final_delivery'].includes(transaction.status) && (
                 <div className="space-y-4 rounded-2xl border border-white/10 bg-white/[0.035] p-5 sm:p-7">
-                  <div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-emerald-300/10 text-emerald-300"><Truck size={20} /></span><div><h2 className="font-semibold">{transaction.status === 'in_transit' ? 'Your parcel is on the way' : 'Delivery is arranged'}</h2><p className="mt-1 text-xs text-slate-400">Tracking updates refresh automatically for both parties.</p></div></div>
+                  <div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-emerald-300/10 text-emerald-300"><Truck size={20} /></span><div><h2 className="font-semibold">{statusLabel(transaction.status)}</h2><p className="mt-1 text-xs text-slate-400">Fleetbase is the source of truth for pickup, handover, aggregation, and onward delivery.</p></div></div>
                   <TrackingSummary transaction={transaction} />
-                  {transaction.shipday_tracking_url && <a href={transaction.shipday_tracking_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-200 no-underline hover:text-emerald-100">Open Shipday tracking <ArrowRight size={15} /></a>}
+                  {transaction.fleetbase_tracking_url && <a href={transaction.fleetbase_tracking_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-200 no-underline hover:text-emerald-100">Open Fleetbase tracking <ArrowRight size={15} /></a>}
+                  {!transaction.fleetbase_tracking_url && transaction.shipday_tracking_url && <a href={transaction.shipday_tracking_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-200 no-underline hover:text-emerald-100">Open pickup tracking <ArrowRight size={15} /></a>}
                 </div>
               )}
               {transaction.status === 'delivered' && (
                 <div className="rounded-2xl border border-emerald-300/20 bg-emerald-300/[0.05] p-5 sm:p-7">
-                  <div className="flex items-center gap-3"><CheckCircle2 className="text-emerald-300" size={22} /><div><h2 className="font-semibold">Shipday marked this parcel delivered</h2><p className="mt-1 text-sm text-slate-400">Confirm that you have the item to start your 24-hour return window.</p></div></div>
+                  <div className="flex items-center gap-3"><CheckCircle2 className="text-emerald-300" size={22} /><div><h2 className="font-semibold">Fleetbase delivered this parcel</h2><p className="mt-1 text-sm text-slate-400">Confirm that you have the item to start your 24-hour return window.</p></div></div>
                   {!isSeller && <button onClick={() => void runAction(() => confirmFulfilmentReceipt(transactionId, token), 'Receipt confirmed. Your 24-hour return window has started.')} disabled={working} className="mt-5 w-full rounded-xl bg-emerald-400 px-5 py-3 text-sm font-bold text-slate-950 disabled:opacity-50">{working ? 'Confirming…' : 'I received the parcel'}</button>}
                   {isSeller && <p className="mt-5 text-xs text-slate-400">The buyer has been asked to confirm receipt. Settlement waits for the return window to end.</p>}
                 </div>
@@ -474,7 +479,7 @@ export default function Fulfilment() {
               {transaction.status === 'completed' && <WaitingCard title="Transaction complete" description={isSeller ? 'Your payout was confirmed.' : 'The seller payout and your salary-deduction loan are confirmed.'} icon={<CheckCircle2 />} />}
               {transaction.status === 'returned' && <WaitingCard title="Return accepted" description="The MFI accepted the return. No seller settlement or salary-deduction loan was created." icon={<CheckCircle2 />} />}
               {transaction.status === 'cancelled' && <WaitingCard title="Transaction cancelled" description="No delivery or salary-deduction loan was created." icon={<CheckCircle2 />} />}
-              {transaction.status === 'delivery_exception' && <WaitingCard title="Delivery needs attention" description="Shipday reported a delivery issue. Settlement is paused while Trustea follows up." icon={<Truck />} />}
+              {transaction.status === 'delivery_exception' && <WaitingCard title="Delivery needs attention" description="Fleetbase reported a delivery issue. Settlement is paused while Trustea follows up." icon={<Truck />} />}
 
               <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
                 <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold text-white">Transaction activity</h2><span className="flex items-center gap-1.5 text-[11px] text-slate-500"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" /> Live</span></div>
@@ -553,8 +558,9 @@ function ItemSummary({ transaction, total }: { transaction: FulfilmentRecord; to
 function TrackingSummary({ transaction }: { transaction: FulfilmentRecord }) {
   const driverLocation = transaction.driver_location;
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
+    <div className="grid gap-3 sm:grid-cols-3">
       <div className="rounded-xl bg-slate-900/80 p-3"><p className="text-[11px] text-slate-500">Pickup</p><p className="mt-1 flex items-start gap-2 text-xs text-slate-200"><MapPin size={14} className="mt-0.5 shrink-0 text-emerald-300" />{transaction.origin?.label || 'Seller location'}</p></div>
+      {transaction.fleetbase_location && <div className="rounded-xl bg-slate-900/80 p-3"><p className="text-[11px] text-slate-500">Fleetbase handover</p><p className="mt-1 flex items-start gap-2 text-xs text-slate-200"><MapPin size={14} className="mt-0.5 shrink-0 text-emerald-300" />{transaction.fleetbase_location.name}</p></div>}
       <div className="rounded-xl bg-slate-900/80 p-3"><p className="text-[11px] text-slate-500">Destination</p><p className="mt-1 flex items-start gap-2 text-xs text-slate-200"><MapPin size={14} className="mt-0.5 shrink-0 text-emerald-300" />{transaction.destination?.label || 'Buyer location'}</p></div>
       {driverLocation && <div className="rounded-xl border border-emerald-300/20 bg-emerald-300/[0.05] p-3 sm:col-span-2">
         <p className="text-[11px] font-semibold text-emerald-200">Live driver location</p>

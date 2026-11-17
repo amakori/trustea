@@ -6,6 +6,8 @@ import {
   History,
   MessageSquare,
   HandCoins,
+  Briefcase,
+  CreditCard,
   AlertTriangle,
   Play,
   RefreshCw,
@@ -36,12 +38,15 @@ import {
   triggerSimulation
 } from './api';
 import CreatorDeductionQueue from './CreatorDeductionQueue';
+import PaymentAuthorizationQueue from './PaymentAuthorizationQueue';
+import ShopFulfilmentQueue from './ShopFulfilmentQueue';
+import SalaryApplicationQueue from './SalaryApplicationQueue';
 import FulfilmentLoanQueue from './FulfilmentLoanQueue';
 import ShippingPickupsQueue from './ShippingPickupsQueue';
 import CollateralVaultQueue from './CollateralVaultQueue';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'monitor' | 'safeguards' | 'gateways' | 'history' | 'sms' | 'creator-deductions' | 'fulfilment' | 'shipping' | 'collateral'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'safeguards' | 'gateways' | 'history' | 'sms' | 'creator-deductions' | 'salary-applications' | 'payment-authorizations' | 'shop-fulfilment' | 'fulfilment' | 'shipping' | 'collateral'>('monitor');
   const [overview, setOverview] = useState<any>(null);
   const [loans, setLoans] = useState<any[]>([]);
   const [borrowers, setBorrowers] = useState<any[]>([]);
@@ -288,6 +293,33 @@ export default function App() {
           >
             <HandCoins className="w-4 h-4" />
             <span>Creator Deductions</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('salary-applications')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg font-medium transition ${
+              activeTab === 'salary-applications' ? 'bg-red-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Briefcase className="w-4 h-4" />
+            <span>Sumthin Applications</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('payment-authorizations')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg font-medium transition ${
+              activeTab === 'payment-authorizations' ? 'bg-red-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <CreditCard className="w-4 h-4" />
+            <span>Sumthin Payments</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('shop-fulfilment')}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg font-medium transition ${
+              activeTab === 'shop-fulfilment' ? 'bg-red-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Package className="w-4 h-4" />
+            <span>Shop Fulfilment</span>
           </button>
           <button
             onClick={() => setActiveTab('fulfilment')}
@@ -898,6 +930,9 @@ export default function App() {
           </div>
         )}
         {activeTab === 'creator-deductions' && <CreatorDeductionQueue />}
+        {activeTab === 'salary-applications' && <SalaryApplicationQueue />}
+        {activeTab === 'payment-authorizations' && <PaymentAuthorizationQueue />}
+        {activeTab === 'shop-fulfilment' && <ShopFulfilmentQueue />}
         {activeTab === 'fulfilment' && <FulfilmentLoanQueue />}
         {activeTab === 'shipping' && <ShippingPickupsQueue />}
         {activeTab === 'collateral' && <CollateralVaultQueue />}
@@ -973,7 +1008,7 @@ export default function App() {
       )}
 
       {/* Mobile Bottom Navigation */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900 border-t border-slate-800 flex items-center justify-around py-2">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900 border-t border-slate-800 flex items-center justify-around overflow-x-auto py-2">
         <button
           onClick={() => setActiveTab('monitor')}
           className={`flex flex-col items-center text-[10px] font-medium ${activeTab === 'monitor' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
@@ -1015,6 +1050,27 @@ export default function App() {
         >
           <HandCoins className="w-5 h-5 mb-0.5" />
           <span>MFI Support</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('salary-applications')}
+          className={`flex shrink-0 flex-col items-center text-[10px] font-medium ${activeTab === 'salary-applications' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
+        >
+          <Briefcase className="w-5 h-5 mb-0.5" />
+          <span>Sumthin</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('payment-authorizations')}
+          className={`flex shrink-0 flex-col items-center text-[10px] font-medium ${activeTab === 'payment-authorizations' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
+        >
+          <CreditCard className="w-5 h-5 mb-0.5" />
+          <span>Payments</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('shop-fulfilment')}
+          className={`flex shrink-0 flex-col items-center text-[10px] font-medium ${activeTab === 'shop-fulfilment' ? 'text-red-500 font-bold' : 'text-slate-400'}`}
+        >
+          <Package className="w-5 h-5 mb-0.5" />
+          <span>Shop</span>
         </button>
         <button
           onClick={() => setActiveTab('fulfilment')}

@@ -20,6 +20,9 @@ type FulfilmentLoan = {
     item_value: number | null;
     insurance_amount: number | null;
     return_window_ends_at: string | null;
+    fleetbase_order_id: string | null;
+    fleetbase_status: string | null;
+    fleetbase_tracking_url: string | null;
   };
 };
 
@@ -191,12 +194,14 @@ export default function FulfilmentLoanQueue() {
                 <span>Seller value: <strong className="text-slate-200">ZMW {Number(transaction.item_value || 0).toFixed(2)}</strong></span>
                 <span className="flex items-center gap-1"><Clock3 className="h-3 w-3" /> Consented {new Date(loan.consent_at).toLocaleString()}</span>
                 {transaction.return_window_ends_at && <span>Return window ends {new Date(transaction.return_window_ends_at).toLocaleString()}</span>}
+                {transaction.fleetbase_order_id && <span>Fleetbase order: <strong className="font-mono text-slate-200">{transaction.fleetbase_order_id}</strong> · {transaction.fleetbase_status || 'created'}</span>}
                 {loan.payout_reference && <span>Payout reference: <strong className="font-mono text-slate-200">{loan.payout_reference}</strong></span>}
               </div>
+              {transaction.fleetbase_tracking_url && <a className="mt-2 inline-flex text-xs text-sky-300 hover:text-sky-200" href={transaction.fleetbase_tracking_url} target="_blank" rel="noreferrer">Open Fleetbase tracking</a>}
               {loan.review_note && <p className="mt-2 text-xs text-slate-500">Review note: {loan.review_note}</p>}
             </div>
             {loan.status === 'pending_mfi' && <div className="flex flex-wrap gap-2">
-              <button disabled={isBusy} onClick={() => review(loan, 'approved')} className="flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-600 disabled:opacity-50"><CheckCircle2 className="h-3.5 w-3.5" /> Approve &amp; book Shipday</button>
+              <button disabled={isBusy} onClick={() => review(loan, 'approved')} className="flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-600 disabled:opacity-50"><CheckCircle2 className="h-3.5 w-3.5" /> Approve &amp; send to Fleetbase</button>
               <button disabled={isBusy} onClick={() => review(loan, 'rejected')} className="flex items-center gap-1.5 rounded-lg border border-red-900 px-3 py-2 text-xs font-bold text-red-300 hover:bg-red-950 disabled:opacity-50"><XCircle className="h-3.5 w-3.5" /> Decline</button>
             </div>}
             {isReturn && <div className="flex flex-wrap gap-2">
